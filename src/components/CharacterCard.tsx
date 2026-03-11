@@ -30,8 +30,8 @@ export default function CharacterCard({ characterId, minimal = false }: Characte
 
   if (minimal) {
     return (
-      <article className="overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
-        <div className="relative h-52 w-full bg-zinc-100">
+      <article className="h-full overflow-hidden rounded-2xl border border-zinc-200 bg-white shadow-sm">
+        <div className="relative h-64 w-full bg-zinc-100">
           {image ? (
             <img src={image} alt={name} className={`h-full w-full object-cover ${unlocked ? '' : 'grayscale opacity-55'}`} />
           ) : (
@@ -46,7 +46,7 @@ export default function CharacterCard({ characterId, minimal = false }: Characte
             </div>
           )}
         </div>
-        <div className={`px-3 py-2 text-lg font-bold ${unlocked ? 'text-zinc-900' : 'text-zinc-400'}`}>{name}</div>
+        <div className={`px-4 py-3 text-2xl font-bold ${unlocked ? 'text-zinc-900' : 'text-zinc-400'}`}>{name}</div>
       </article>
     );
   }
