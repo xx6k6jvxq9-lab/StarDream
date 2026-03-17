@@ -159,7 +159,7 @@ export default function GlobalBgmPlayer() {
     initializedRef.current = true;
     if (tracks.length > 0) {
       setCurrentIndex(DEFAULT_TRACK_INDEX);
-      setPlaying(false);
+      setPlaying(true);
     }
   }, [mounted, setCurrentIndex, setPlaying, tracks.length]);
 
