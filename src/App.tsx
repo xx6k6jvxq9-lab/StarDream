@@ -1,4 +1,4 @@
-﻿import React, { useState, useEffect, useRef, useMemo } from 'react';
+﻿import React, { Suspense, lazy, useState, useEffect, useRef, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import Cropper, { type Area, type Point } from 'react-easy-crop';
 import { 
@@ -19,26 +19,10 @@ import {
   CHARACTER_PROFILES, CHARACTER_PROFILE_IMAGES, ENCOUNTER_CONFIG, SPECIAL_EVENT_CONFIG
 } from './gameData';
 import { type CharacterId, CHARACTER_NAMES, useGameStore } from './store/useGameStore';
-import CharacterCard from './components/CharacterCard';
-import TaskScreen from './components/TaskScreen';
-import EncounterModal from './components/EncounterModal';
-import Agency from './components/Agency';
 import { getStoryById } from './stories';
 import { buildDailyChatStory } from './stories/dailyChats';
 import { TASK_MILESTONE_REWARDS } from './data/tasks';
 import { STAFF_POOL } from './data/staffData';
-
-import { 
-  generateStory, 
-  generateEventPerformance, 
-  generateScriptReading,
-  generateNPC,
-  generateNPCPost,
-  generateNPCResponse,
-  generateJobEvaluation,
-  generateIndustryEvent,
-  generateCharacterChatReply
-} from './services/gemini';
 
 type SafeImageProps = {
   src?: string;
@@ -47,6 +31,13 @@ type SafeImageProps = {
   fallbackClassName?: string;
   iconClassName?: string;
 };
+
+let geminiModulePromise: Promise<typeof import('./services/gemini')> | null = null;
+const loadGeminiModule = () => (geminiModulePromise ??= import('./services/gemini'));
+const CharacterCard = lazy(() => import('./components/CharacterCard'));
+const TaskScreen = lazy(() => import('./components/TaskScreen'));
+const EncounterModal = lazy(() => import('./components/EncounterModal'));
+const Agency = lazy(() => import('./components/Agency'));
 
 const resolveCharacterImage = (id?: CharacterId | null) => {
   if (!id) return '';
@@ -68,7 +59,7 @@ const SafeImage = ({ src, alt, className = '', fallbackClassName = '', iconClass
     );
   }
 
-  return <img src={src} alt={alt} className={className} onError={() => setFailed(true)} />;
+  return <img src={src} alt={alt} className={className} onError={() => setFailed(true)} loading="lazy" decoding="async" />;
 };
 
 type GameState = {
@@ -147,6 +138,14 @@ const LOGIN_CHARACTER_STRIPS = Object.entries(
     ].includes(id)
   )
   .sort((a, b) => a.id.localeCompare(b.id));
+
+const LOGIN_PRIORITY_IDS = new Set(['liu_mengyao', 'lu_xingran']);
+const LOGIN_PRELOAD_IMAGE_URLS = [
+  new URL('./assets/characters/liu_mengyao.png', import.meta.url).href,
+  new URL('./assets/characters/lu_xingran.png', import.meta.url).href,
+];
+const LOGIN_STRIP_IMAGE_WIDTH = 1080;
+const LOGIN_STRIP_IMAGE_HEIGHT = 1920;
 
 const DAYS_PER_MONTH = 30;
 const MONTHS_PER_YEAR = 12;
@@ -377,6 +376,7 @@ export default function App() {
   const [isCharacterPanelOpen, setIsCharacterPanelOpen] = useState(false);
   const [selectedCharacterId, setSelectedCharacterId] = useState<CharacterId | null>(null);
   const [backgroundConfig, setBackgroundConfig] = useState<BackgroundCustomizer>(DEFAULT_BACKGROUND_CUSTOMIZER);
+  const [shouldLoadFullLoginGallery, setShouldLoadFullLoginGallery] = useState(false);
   const [isAvatarPickerOpen, setIsAvatarPickerOpen] = useState(false);
   const [avatarPickerMode, setAvatarPickerMode] = useState<'menu' | 'upload' | 'preset'>('menu');
   const [activeJobTab, setActiveJobTab] = useState<'all' | 'acting' | 'music' | 'gaming' | 'business'>('all');
@@ -464,6 +464,53 @@ export default function App() {
     }
     return {};
   }, [backgroundConfig, paletteColors]);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    const links = LOGIN_PRELOAD_IMAGE_URLS.map((href) => {
+      const link = document.createElement('link');
+      link.rel = 'preload';
+      link.as = 'image';
+      link.href = href;
+      document.head.appendChild(link);
+      return link;
+    });
+    return () => {
+      links.forEach((link) => link.remove());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (gameState || isCreating) {
+      setShouldLoadFullLoginGallery(true);
+      return;
+    }
+    if (typeof window === 'undefined') return;
+
+    let active = true;
+    const revealGallery = () => {
+      if (active) setShouldLoadFullLoginGallery(true);
+    };
+    const onUserIntent = () => revealGallery();
+    const hasRIC = 'requestIdleCallback' in window;
+    const idleId = hasRIC
+      ? window.requestIdleCallback(revealGallery, { timeout: 1500 })
+      : window.setTimeout(revealGallery, 900);
+
+    window.addEventListener('pointerdown', onUserIntent, { once: true, passive: true });
+    window.addEventListener('keydown', onUserIntent, { once: true });
+
+    return () => {
+      active = false;
+      if (hasRIC) {
+        window.cancelIdleCallback(idleId as number);
+      } else {
+        window.clearTimeout(idleId as number);
+      }
+      window.removeEventListener('pointerdown', onUserIntent);
+      window.removeEventListener('keydown', onUserIntent);
+    };
+  }, [gameState, isCreating]);
 
   const [viewingUserId, setViewingUserId] = useState<string | null>(null);
   const characters = useGameStore((state) => state.characters);
@@ -704,6 +751,7 @@ export default function App() {
     setContactError(null);
 
     try {
+      const { generateCharacterChatReply } = await loadGeminiModule();
       const result = await generateCharacterChatReply({
         characterName: CHARACTER_NAMES[selectedContactId],
         bio: profile?.bio ?? '',
@@ -779,6 +827,7 @@ export default function App() {
     const runWorldUpdate = async () => {
       // 1. Chance to generate new NPC if count is low
       if (gameState.dynamicNPCs.length < 8 && Math.random() < 0.4) {
+        const { generateNPC } = await loadGeminiModule();
         const newNPCData = await generateNPC();
         const newNPC: SocialUser = {
           id: `npc_${Date.now()}`,
@@ -807,6 +856,7 @@ export default function App() {
       if (Math.random() < 0.5) {
         const wd = getDisplayWeekDay(gameState.time.week);
         const gameContext = `当前时间：第${gameState.time.year}年${gameState.time.month}月第${wd.week}周第${wd.day}天。主角${gameState.player.name}正在娱乐圈闯荡。`;
+        const { generateNPCPost } = await loadGeminiModule();
         const content = await generateNPCPost({
           name: postingNPC.name,
           title: postingNPC.title,
@@ -1602,6 +1652,7 @@ export default function App() {
 
       if (shouldShowStoryModal) {
         try {
+          const { generateStory, generateJobEvaluation } = await loadGeminiModule();
           const [story, evaluationData] = await Promise.all([
             generateStory(gameState.player.name, task.name, task.desc, effectiveStats),
             generateJobEvaluation(task.name, effectiveStats, gameState.player.name)
@@ -1925,6 +1976,7 @@ export default function App() {
     if (Math.random() >= triggerChance) return;
 
     const company = COMPANIES.find(c => c.id === state.player.companyId);
+    const { generateIndustryEvent } = await loadGeminiModule();
     const event = await generateIndustryEvent(
       state.player.name,
       state.player.stats,
@@ -2015,6 +2067,7 @@ export default function App() {
         isLoading: true
       });
       try {
+        const { generateScriptReading } = await loadGeminiModule();
         const story = await generateScriptReading(gameState.player.name, gameState.player.stats);
         setStoryModal(prev => ({ ...prev, content: story, isLoading: false }));
       } catch (error) {
@@ -2490,11 +2543,13 @@ export default function App() {
         if (npc && Math.random() < 0.7) { // 70% chance to respond
           const wd = getDisplayWeekDay(prev.time.week);
           const gameContext = `当前时间：第${prev.time.year}年${prev.time.month}月第${wd.week}周第${wd.day}天。主角${prev.player.name}正在娱乐圈闯荡。`;
-          generateNPCResponse({
-            name: npc.name,
-            title: npc.title,
-            personality: npc.personality || "普通"
-          }, comment, gameContext, false).then(response => {
+          loadGeminiModule().then(({ generateNPCResponse }) =>
+            generateNPCResponse({
+              name: npc.name,
+              title: npc.title,
+              personality: npc.personality || "普通"
+            }, comment, gameContext, false)
+          ).then(response => {
             setGameState(current => {
               if (!current) return current;
               return {
@@ -2510,6 +2565,8 @@ export default function App() {
                 }
               };
             });
+          }).catch(() => {
+            // ignore NPC reply failures to keep commenting responsive
           });
         }
       }
@@ -2563,11 +2620,13 @@ export default function App() {
       // Trigger NPC response
       const wd = getDisplayWeekDay(prev.time.week);
       const gameContext = `当前时间：第${prev.time.year}年${prev.time.month}月第${wd.week}周第${wd.day}天。主角${prev.player.name}正在娱乐圈闯荡。`;
-      generateNPCResponse({
-        name: npc.name,
-        title: npc.title,
-        personality: npc.personality || "普通"
-      }, content, gameContext, true).then(response => {
+      loadGeminiModule().then(({ generateNPCResponse }) =>
+        generateNPCResponse({
+          name: npc.name,
+          title: npc.title,
+          personality: npc.personality || "普通"
+        }, content, gameContext, true)
+      ).then(response => {
         setGameState(current => {
           if (!current) return current;
           const currentConvs = [...current.player.social.conversations];
@@ -2699,6 +2758,8 @@ export default function App() {
         title: job.name,
         content: '正在生成剧情...',
         isLoading: true
+      }).catch(() => {
+        // ignore NPC DM failures to avoid blocking the local message send
       });
     }
 
@@ -2707,6 +2768,7 @@ export default function App() {
 
     if (shouldShowStoryModal) {
       try {
+        const { generateStory, generateJobEvaluation } = await loadGeminiModule();
         const [story, evaluationData] = await Promise.all([
           generateStory(gameState.player.name, job.name, job.desc, effectiveStats, randomRival?.name),
           generateJobEvaluation(job.name, effectiveStats, gameState.player.name)
@@ -2834,6 +2896,7 @@ export default function App() {
         return;
       }
 
+      const { generateEventPerformance } = await loadGeminiModule();
       const performance = await generateEventPerformance(
         currentState.player.name,
         eventTitle,
@@ -3393,38 +3456,54 @@ export default function App() {
           }`}
         >
           {LOGIN_CHARACTER_STRIPS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className="group relative min-w-0 overflow-hidden transition-[flex] duration-700 ease-[cubic-bezier(0.22,1,0.36,1)]"
-              style={{
-                flex: expandedId ? (expandedId === item.id ? 2.4 : 0.85) : 1,
-              }}
-              onClick={(e) => {
-                e.stopPropagation();
-                setExpandedId((prev) => (prev === item.id ? null : item.id));
-                setHasExpandedOnce(true);
-              }}
-            >
-              <img
-                src={item.src}
-                alt={item.name}
-                className={`h-full w-full object-cover object-top transition duration-500 ease-out ${
-                  expandedId
-                    ? expandedId === item.id
-                      ? 'brightness-[1.08] saturate-110 contrast-105'
-                      : 'brightness-[0.92] saturate-95'
-                    : 'brightness-[0.98] saturate-105'
-                }`}
-                loading="eager"
-                decoding="async"
-              />
-              {expandedId === item.id && (
-                <div className="pointer-events-none absolute left-6 top-6 text-lg font-semibold tracking-[0.18em] text-white/85 drop-shadow-lg">
-                  {CHARACTER_NAMES[item.id as CharacterId] ?? item.name}
-                </div>
-              )}
-            </button>
+            (() => {
+              const isPriority = LOGIN_PRIORITY_IDS.has(item.id);
+              const shouldLoadImage = isPriority || shouldLoadFullLoginGallery || expandedId === item.id;
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  className="group relative min-w-0 overflow-hidden transition-[flex] duration-700 ease-[cubic-bezier(0.22,1,0.36,1)]"
+                  style={{
+                    flex: expandedId ? (expandedId === item.id ? 2.4 : 0.85) : 1,
+                  }}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setShouldLoadFullLoginGallery(true);
+                    setExpandedId((prev) => (prev === item.id ? null : item.id));
+                    setHasExpandedOnce(true);
+                  }}
+                >
+                  {shouldLoadImage ? (
+                    <img
+                      src={item.src}
+                      alt={item.name}
+                      className={`h-full w-full object-cover object-top transition duration-500 ease-out ${
+                        expandedId
+                          ? expandedId === item.id
+                            ? 'brightness-[1.08] saturate-110 contrast-105'
+                            : 'brightness-[0.92] saturate-95'
+                          : 'brightness-[0.98] saturate-105'
+                      }`}
+                      loading={isPriority ? 'eager' : 'lazy'}
+                      decoding="async"
+                      fetchPriority={isPriority ? 'high' : 'low'}
+                      width={LOGIN_STRIP_IMAGE_WIDTH}
+                      height={LOGIN_STRIP_IMAGE_HEIGHT}
+                      sizes="(max-width: 640px) 42vw, 18vw"
+                    />
+                  ) : (
+                    <div className="h-full w-full bg-[radial-gradient(circle_at_50%_15%,rgba(255,255,255,0.18),transparent_32%),linear-gradient(180deg,rgba(50,43,52,0.96)_0%,rgba(25,22,28,0.92)_100%)]" />
+                  )}
+                  <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-black/0 via-black/0 to-black/16" />
+                  {expandedId === item.id && (
+                    <div className="pointer-events-none absolute left-6 top-6 text-lg font-semibold tracking-[0.18em] text-white/85 drop-shadow-lg">
+                      {CHARACTER_NAMES[item.id as CharacterId] ?? item.name}
+                    </div>
+                  )}
+                </button>
+              );
+            })()
           ))}
         </div>
         <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-white/10 via-transparent to-black/20 transition-all duration-500" />
@@ -4368,7 +4447,9 @@ export default function App() {
                                       }}
                                       className={unlocked ? 'w-full text-left' : 'w-full cursor-not-allowed text-left'}
                                     >
-                                      <CharacterCard characterId={characterId} minimal />
+                                      <Suspense fallback={<div className="h-[128px] rounded-2xl bg-zinc-100/70" />}>
+                                        <CharacterCard characterId={characterId} minimal />
+                                      </Suspense>
                                     </button>
                                     {missed && (
                                       <span className="absolute left-2 top-2 rounded-full bg-red-500/90 px-2 py-0.5 text-xs font-bold text-white shadow-sm">
@@ -4552,21 +4633,23 @@ export default function App() {
               )}
 
               {currentLocation === 'company' && (
-                <Agency
-                  player={player}
-                  time={time}
-                  effectiveStats={effectiveStats}
-                  companyState={companyState}
-                  getStatName={getStatName}
-                  formatDisplayTime={formatDisplayTime}
-                  onUpgradeFacility={upgradeFacility}
-                  onPerformAction={performAction}
-                  onAddToSchedule={addToSchedule}
-                  onSwitchCompany={switchCompany}
-                  onCreateBossMode={createBossCompany}
-                  onHireStaff={hireStaff}
-                  onFireStaff={fireStaff}
-                />
+                <Suspense fallback={<div className="h-[420px] rounded-3xl border border-zinc-200 bg-white/80" />}>
+                  <Agency
+                    player={player}
+                    time={time}
+                    effectiveStats={effectiveStats}
+                    companyState={companyState}
+                    getStatName={getStatName}
+                    formatDisplayTime={formatDisplayTime}
+                    onUpgradeFacility={upgradeFacility}
+                    onPerformAction={performAction}
+                    onAddToSchedule={addToSchedule}
+                    onSwitchCompany={switchCompany}
+                    onCreateBossMode={createBossCompany}
+                    onHireStaff={hireStaff}
+                    onFireStaff={fireStaff}
+                  />
+                </Suspense>
               )}
 
               {currentLocation === 'home' && ACTIONS[currentLocation] && (
@@ -6020,16 +6103,18 @@ export default function App() {
               )}
               {currentLocation === 'quests' && (
                 <div className="space-y-6">
-                  <TaskScreen
-                    player={player}
-                    tasks={PHASE_TASKS}
-                    completedTaskIds={player.submittedPhaseTasks}
-                    currentTime={gameState.time}
-                    liuFavor={liuFavor}
-                    getReqCurrentValue={getPhaseReqCurrentValue}
-                    onSubmit={handleSubmitPhaseTask}
-                    isMobileLandscapeViewport={isMobileLandscapeViewport}
-                  />
+                  <Suspense fallback={<div className="h-[420px] rounded-2xl border border-zinc-200 bg-white/80" />}>
+                    <TaskScreen
+                      player={player}
+                      tasks={PHASE_TASKS}
+                      completedTaskIds={player.submittedPhaseTasks}
+                      currentTime={gameState.time}
+                      liuFavor={liuFavor}
+                      getReqCurrentValue={getPhaseReqCurrentValue}
+                      onSubmit={handleSubmitPhaseTask}
+                      isMobileLandscapeViewport={isMobileLandscapeViewport}
+                    />
+                  </Suspense>
                 </div>
               )}
 
@@ -6154,10 +6239,12 @@ export default function App() {
       )}
       {renderEventModal()}
       {activeStory && (
-        <EncounterModal
-          story={activeStory}
-          onClose={(payload) => handleEncounterModalClose(activeStory?.id, payload)}
-        />
+        <Suspense fallback={null}>
+          <EncounterModal
+            story={activeStory}
+            onClose={(payload) => handleEncounterModalClose(activeStory?.id, payload)}
+          />
+        </Suspense>
       )}
       {renderAvatarPickerModal()}
       {renderAvatarCropModal()}

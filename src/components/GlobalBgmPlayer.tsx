@@ -1,26 +1,24 @@
 import { Pause, Play, SkipBack, SkipForward, Music2 } from "lucide-react";
 import { type PointerEvent as ReactPointerEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { type BgmTrack, useBgmPlayer } from "../store/useBgmPlayer";
+import { useBgmPlayer } from "../store/useBgmPlayer";
 
-const BGM_FILES = import.meta.glob("../assets/bgm/*.{mp3,wav,ogg,m4a,aac,flac}", {
-  eager: true,
+const BGM_FILE_LOADERS = import.meta.glob("../assets/bgm/*.{mp3,wav,ogg,m4a,aac,flac}", {
   import: "default",
-}) as Record<string, string>;
+}) as Record<string, () => Promise<string>>;
 
-const TRACKS: BgmTrack[] = Object.entries(BGM_FILES)
-  .map(([path, src]) => {
+const TRACKS = Object.entries(BGM_FILE_LOADERS)
+  .map(([path, loader]) => {
     const filename = path.split("/").pop() || "track";
     const name = filename.replace(/\.[^/.]+$/, "");
-    return { id: filename, name, src };
+    return { id: filename, name, loader };
   })
   .sort((a, b) => a.name.localeCompare(b.name, "zh-Hans-CN"));
 
-const MIRROR_TRACK_KEYWORDS = ["镜头", "闀滃ご"];
-
+const MIRROR_TRACK_KEYWORDS = ["镜头"];
 const DEFAULT_TRACK_INDEX = (() => {
-  const exact = TRACKS.findIndex((t) => MIRROR_TRACK_KEYWORDS.includes(t.name));
+  const exact = TRACKS.findIndex((track) => MIRROR_TRACK_KEYWORDS.includes(track.name));
   if (exact >= 0) return exact;
-  const fuzzy = TRACKS.findIndex((t) => MIRROR_TRACK_KEYWORDS.some((keyword) => t.name.includes(keyword)));
+  const fuzzy = TRACKS.findIndex((track) => MIRROR_TRACK_KEYWORDS.some((keyword) => track.name.includes(keyword)));
   return fuzzy >= 0 ? fuzzy : 0;
 })();
 
@@ -70,6 +68,7 @@ const samePosition = (a: { x: number; y: number }, b: { x: number; y: number }) 
 export default function GlobalBgmPlayer() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const loadedTrackIdRef = useRef<string | null>(null);
+  const loadedTrackSrcRef = useRef<Record<string, string>>({});
   const hasRetriedAutoplayRef = useRef(false);
   const dragMeta = useRef({
     dragging: false,
@@ -106,24 +105,49 @@ export default function GlobalBgmPlayer() {
   const mode = isMobileLike ? "mobile" : "desktop";
   const position = isMobileLike ? mobilePosition : desktopPosition;
 
-  const tryPlayCurrent = useCallback(() => {
-    const audio = audioRef.current;
-    if (!audio || !currentTrack) return;
+  const ensureAudio = useCallback(() => {
+    if (audioRef.current) return audioRef.current;
+    const audio = new Audio();
+    audio.preload = "none";
+    audio.volume = 0.7;
+    audio.loop = true;
+    audioRef.current = audio;
+    return audio;
+  }, []);
+
+  const resolveTrackSrc = useCallback(async (trackId: string) => {
+    if (loadedTrackSrcRef.current[trackId]) return loadedTrackSrcRef.current[trackId];
+    const track = TRACKS.find((item) => item.id === trackId);
+    if (!track) return "";
+    const src = await track.loader();
+    loadedTrackSrcRef.current[trackId] = src;
+    return src;
+  }, []);
+
+  const syncCurrentTrack = useCallback(async () => {
+    if (!currentTrack) return null;
+    const audio = ensureAudio();
+    const src = await resolveTrackSrc(currentTrack.id);
+    if (!src) return null;
     if (loadedTrackIdRef.current !== currentTrack.id) {
-      audio.src = currentTrack.src;
+      audio.src = src;
       loadedTrackIdRef.current = currentTrack.id;
       audio.currentTime = 0;
     }
     audio.loop = true;
-    void audio
-      .play()
-      .then(() => {
-        autoplayBlockedRef.current = false;
-      })
-      .catch(() => {
-        autoplayBlockedRef.current = true;
-      });
-  }, [currentTrack]);
+    return audio;
+  }, [currentTrack, ensureAudio, resolveTrackSrc]);
+
+  const tryPlayCurrent = useCallback(async () => {
+    if (!currentTrack) return;
+    const audio = await syncCurrentTrack();
+    if (!audio) return;
+    void audio.play().then(() => {
+      autoplayBlockedRef.current = false;
+    }).catch(() => {
+      autoplayBlockedRef.current = true;
+    });
+  }, [currentTrack, syncCurrentTrack]);
 
   useEffect(() => {
     setMounted(true);
@@ -135,9 +159,9 @@ export default function GlobalBgmPlayer() {
     initializedRef.current = true;
     if (tracks.length > 0) {
       setCurrentIndex(DEFAULT_TRACK_INDEX);
-      setPlaying(true);
+      setPlaying(false);
     }
-  }, [mounted, tracks.length, setCurrentIndex, setPlaying]);
+  }, [mounted, setCurrentIndex, setPlaying, tracks.length]);
 
   useEffect(() => {
     if (!mounted) return;
@@ -181,6 +205,7 @@ export default function GlobalBgmPlayer() {
         setPosition(nextMode, nextPosition);
       }
     };
+
     window.addEventListener("resize", onResize);
     window.visualViewport?.addEventListener("resize", onResize);
     return () => {
@@ -203,15 +228,7 @@ export default function GlobalBgmPlayer() {
   }, []);
 
   useEffect(() => {
-    if (!audioRef.current) {
-      const audio = new Audio();
-      audio.preload = "auto";
-      audio.volume = 0.7;
-      audio.loop = true;
-      audioRef.current = audio;
-    }
-
-    const audio = audioRef.current;
+    const audio = ensureAudio();
     const handleEnded = () => {
       audio.currentTime = 0;
       if (isPlaying) {
@@ -225,25 +242,28 @@ export default function GlobalBgmPlayer() {
     return () => {
       audio.removeEventListener("ended", handleEnded);
     };
-  }, [isPlaying]);
+  }, [ensureAudio, isPlaying]);
 
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !currentTrack) return;
-    if (loadedTrackIdRef.current !== currentTrack.id) {
-      audio.src = currentTrack.src;
-      loadedTrackIdRef.current = currentTrack.id;
-      audio.currentTime = 0;
-    }
+    if (!currentTrack) return;
+    let cancelled = false;
 
-    audio.loop = true;
+    const syncAudioState = async () => {
+      const audio = await syncCurrentTrack();
+      if (!audio || cancelled) return;
+      if (isPlaying) {
+        await tryPlayCurrent();
+      } else {
+        audio.pause();
+      }
+    };
 
-    if (isPlaying) {
-      tryPlayCurrent();
-    } else {
-      audio.pause();
-    }
-  }, [currentTrack, isPlaying, tryPlayCurrent]);
+    void syncAudioState();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentTrack, isPlaying, syncCurrentTrack, tryPlayCurrent]);
 
   useEffect(() => {
     if (!isPlaying || !autoplayBlockedRef.current || hasRetriedAutoplayRef.current) return;
@@ -253,7 +273,7 @@ export default function GlobalBgmPlayer() {
       window.removeEventListener("pointerdown", resumeOnFirstInteract);
       window.removeEventListener("keydown", resumeOnFirstInteract);
       if (audioRef.current && !audioRef.current.paused) return;
-      tryPlayCurrent();
+      void tryPlayCurrent();
     };
 
     const opts: AddEventListenerOptions = { passive: true };
@@ -269,7 +289,7 @@ export default function GlobalBgmPlayer() {
   useEffect(() => {
     const onVisibility = () => {
       if (!document.hidden && isPlaying && audioRef.current) {
-        tryPlayCurrent();
+        void tryPlayCurrent();
       }
     };
 
@@ -284,7 +304,6 @@ export default function GlobalBgmPlayer() {
             shell:
               "border-[#8a7a6b]/45 bg-[linear-gradient(160deg,rgba(20,17,15,0.72)_0%,rgba(35,28,24,0.62)_100%)] text-zinc-100 shadow-[0_22px_52px_-24px_rgba(0,0,0,0.82)] backdrop-blur-2xl",
             title: "text-[#f3ece2]",
-            sub: "text-[#d5c7b8]",
             select:
               "border-[#9a8875]/50 bg-[rgba(28,23,20,0.72)] text-[#f3ece2] focus:border-[#bca48b]/70 focus:ring-2 focus:ring-[#bca48b]/25",
             btnControl:
@@ -297,7 +316,6 @@ export default function GlobalBgmPlayer() {
             shell:
               "border-white/65 bg-[linear-gradient(160deg,rgba(255,255,255,0.58)_0%,rgba(255,255,255,0.42)_100%)] text-zinc-900 shadow-[0_18px_40px_-24px_rgba(24,24,27,0.35)] backdrop-blur-2xl",
             title: "text-zinc-900",
-            sub: "text-zinc-600",
             select:
               "border-white/75 bg-[rgba(255,255,255,0.62)] text-zinc-800 focus:border-zinc-300 focus:ring-2 focus:ring-zinc-300/35",
             btnControl: "border-zinc-300 bg-zinc-900/92 text-white hover:bg-zinc-800",
@@ -338,6 +356,30 @@ export default function GlobalBgmPlayer() {
     if (!moved) togglePanel();
   };
 
+  const handlePlayToggle = async () => {
+    if (tracks.length === 0) return;
+    if (!isPlaying) {
+      await syncCurrentTrack();
+    }
+    togglePlaying();
+  };
+
+  const handleTrackChange = async (nextIndex: number) => {
+    setCurrentIndex(nextIndex);
+    if (!isPlaying) return;
+    const nextTrack = tracks[nextIndex];
+    if (!nextTrack) return;
+    const audio = ensureAudio();
+    const src = await resolveTrackSrc(nextTrack.id);
+    if (!src) return;
+    audio.src = src;
+    audio.currentTime = 0;
+    loadedTrackIdRef.current = nextTrack.id;
+    void audio.play().catch(() => {
+      autoplayBlockedRef.current = true;
+    });
+  };
+
   if (!mounted) return null;
 
   return (
@@ -349,10 +391,7 @@ export default function GlobalBgmPlayer() {
         }
       `}</style>
 
-      <div
-        className="fixed z-[180] select-none"
-        style={{ left: `${position.x}px`, top: `${position.y}px` }}
-      >
+      <div className="fixed z-[180] select-none" style={{ left: `${position.x}px`, top: `${position.y}px` }}>
         <button
           type="button"
           onPointerDown={handlePointerDown}
@@ -394,7 +433,9 @@ export default function GlobalBgmPlayer() {
             </button>
             <button
               type="button"
-              onClick={() => togglePlaying()}
+              onClick={() => {
+                void handlePlayToggle();
+              }}
               disabled={tracks.length === 0}
               className={`flex h-9 w-9 items-center justify-center rounded-lg border text-sm transition ${panelStyle.btnControl} disabled:cursor-not-allowed disabled:opacity-50`}
               aria-label={isPlaying ? "暂停" : "播放"}
@@ -414,7 +455,9 @@ export default function GlobalBgmPlayer() {
 
           <select
             value={safeIndex}
-            onChange={(e) => setCurrentIndex(Number(e.target.value))}
+            onChange={(e) => {
+              void handleTrackChange(Number(e.target.value));
+            }}
             className={`w-full rounded-lg border px-2 py-2 text-xs font-medium outline-none transition ${panelStyle.select}`}
           >
             {tracks.length === 0 ? (
