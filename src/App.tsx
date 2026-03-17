@@ -119,7 +119,7 @@ const getRandomTaunt = (type: 'money' | 'stamina' | 'stats') => {
 };
 
 const LOGIN_CHARACTER_STRIPS = Object.entries(
-  import.meta.glob('./assets/characters/*.{png,jpg,jpeg,webp}', { eager: true, import: 'default' }) as Record<string, string>
+  import.meta.glob('./assets/characters/login/*.{jpg,jpeg,webp}', { eager: true, import: 'default' }) as Record<string, string>
 )
   .map(([path, src]) => {
     const filename = path.split('/').pop() || 'character';
@@ -141,11 +141,11 @@ const LOGIN_CHARACTER_STRIPS = Object.entries(
 
 const LOGIN_PRIORITY_IDS = new Set(['liu_mengyao', 'lu_xingran']);
 const LOGIN_PRELOAD_IMAGE_URLS = [
-  new URL('./assets/characters/liu_mengyao.png', import.meta.url).href,
-  new URL('./assets/characters/lu_xingran.png', import.meta.url).href,
+  new URL('./assets/characters/login/liu_mengyao.jpg', import.meta.url).href,
+  new URL('./assets/characters/login/lu_xingran.jpg', import.meta.url).href,
 ];
-const LOGIN_STRIP_IMAGE_WIDTH = 1080;
-const LOGIN_STRIP_IMAGE_HEIGHT = 1920;
+const LOGIN_STRIP_IMAGE_WIDTH = 720;
+const LOGIN_STRIP_IMAGE_HEIGHT = 1400;
 
 const DAYS_PER_MONTH = 30;
 const MONTHS_PER_YEAR = 12;
