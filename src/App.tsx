@@ -2758,8 +2758,6 @@ export default function App() {
         title: job.name,
         content: '正在生成剧情...',
         isLoading: true
-      }).catch(() => {
-        // ignore NPC DM failures to avoid blocking the local message send
       });
     }
 
